@@ -1,6 +1,7 @@
 import yaml
 import datetime
 from pathlib import Path
+import argparse
 
 def get_log_dict(path="log.yaml"):
     log_dict = yaml.safe_load(Path(path).read_text())
@@ -85,7 +86,11 @@ def get_fy_hours(weekly_hours, weekday_start=1):
 # list(zip(list(np.cumsum(list(payperiod_hours.values()))), payperiod_hours))
 
 if __name__ == "__main__":
-    log_dict = get_log_dict()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("file", help="log file",)
+    args = parser.parse_args()
+
+    log_dict = get_log_dict(args.file)
     mins_dict = get_mins(log_dict)
     weekly_hours = get_weekly_hours(mins_dict=mins_dict)
     payperiod_hours = get_payperiod_hours(mins_dict=mins_dict)
