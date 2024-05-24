@@ -87,13 +87,18 @@ def get_fy_hours(weekly_hours, weekday_start=1):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("file", help="log file",)
+    parser.add_argument('path', help='path to log file')
+    parser.add_argument('-d', '--daily_log', help='print hours from each minutes dict', action='store_true')
     args = parser.parse_args()
 
-    log_dict = get_log_dict(args.file)
+    log_dict = get_log_dict(args.path)
     mins_dict = get_mins(log_dict)
     weekly_hours = get_weekly_hours(mins_dict=mins_dict)
     payperiod_hours = get_payperiod_hours(mins_dict=mins_dict)
+
+    if args.daily_log:
+        for day, minutes in mins_dict.items():
+            print(day.strftime('%Y/%m/%d')+': {:02d}:{:02d}'.format(*divmod(minutes, 60)))
 
     today = datetime.datetime.now()
     try:
