@@ -42,7 +42,7 @@ to be inserted in the keybindings.json file (can be accessed by searching ctrl-s
     "command": "editor.action.insertSnippet",
     "when": "editorTextFocus",
     "args": {
-        "snippet": "\n  - date: ${CURRENT_DATE}-$CURRENT_MONTH-$CURRENT_YEAR\n    start: $1\n    end: $2\n    work:\n      - $3"
+        "snippet": "\n  - date: ${CURRENT_DATE}/$CURRENT_MONTH/$CURRENT_YEAR\n    start: $1\n    end: $2\n    work:\n      - $3"
     }
 }
 ```
