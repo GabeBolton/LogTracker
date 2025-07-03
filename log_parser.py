@@ -102,31 +102,31 @@ if __name__ == "__main__":
 
     today = datetime.datetime.now()
     try:
-        print(f"hours today: {mins_dict[today.date()]/60}")
+        print(f"hours today: {mins_dict[today.date()]/60:.2f}")
     except KeyError:
         print('no hours today')
     
     try:
-        print(f"hours this week: {weekly_hours[(today.year, today.isocalendar().week)]}")
+        print(f"hours this week: {weekly_hours[(today.year, today.isocalendar().week)]:.2f}")
     except KeyError:
         print('no hours this week')
 
     try:
-        print(f"hours last week: {weekly_hours[(today.year, today.isocalendar().week-1)]}")
+        print(f"hours last week: {weekly_hours[(today.year, today.isocalendar().week-1)]:.2f}")
     except KeyError:
         print('no hours last week')
 
     try:
-        print(f"hours this payperiod: {payperiod_hours[get_payperiod_key(today.date())]}")
+        print(f"hours this payperiod: {payperiod_hours[get_payperiod_key(today.date())]:.2f}")
     except KeyError:
         print('no hours this payperiod')
 
 
     try:
-        print(f"hours last payperiod: {payperiod_hours[get_payperiod_key(today.date()-datetime.timedelta(days=14))]}")
+        print(f"hours last payperiod: {payperiod_hours[get_payperiod_key(today.date()-datetime.timedelta(days=14))]:.2f}")
     except KeyError:
         print('no hours last payperiod')
 
-    print(f"total hours: {sum(weekly_hours.values())}")
+    print(f"total hours: {sum(weekly_hours.values()):.2f}")
 
     pass
