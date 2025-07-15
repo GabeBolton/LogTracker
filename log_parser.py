@@ -167,6 +167,11 @@ def output_csv_detailed(log_dict):
             row['hours'] = ''
         writer.writerow(row)
 
+def assert_all_logs_have_project(log_dict):
+    for i, log in enumerate(log_dict['logs']):
+        if 'project' not in log or not log['project']:
+            raise ValueError(f"Log entry at index {i} and date {log.get('date', 'unknown')} is missing a 'project' field.")
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('path', help='path to log file')
@@ -176,6 +181,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     log_dict = get_log_dict(args.path)
+    assert_all_logs_have_project(log_dict)
     mins_dict = get_mins(log_dict)
     weekly_hours = get_weekly_hours(mins_dict=mins_dict)
 
