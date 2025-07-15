@@ -2,6 +2,8 @@ import yaml
 import datetime
 from pathlib import Path
 import argparse
+import csv
+import sys
 
 def get_log_dict(path="log.yaml"):
     log_dict = yaml.safe_load(Path(path).read_text())
@@ -122,10 +124,55 @@ def get_payperiod_hours(mins_dict, payperiod_type, period_start):
             payperiod_hours[key] = mins / 60
     return payperiod_hours
 
+def output_csv_basic(log_dict):
+    project_codes = log_dict.get('project_codes', {})
+    writer = csv.writer(sys.stdout)
+    writer.writerow(['project', 'date', 'hours'])
+    for log in log_dict['logs']:
+        project_code = log.get('project', '')
+        if project_code not in project_codes:
+            raise ValueError(f"Project code '{project_code}' not found in project_codes mapping.")
+        project_label = project_codes[project_code]
+        date = log['date']
+        try:
+            start = float(log['start'])
+            end = float(log['end'])
+            hours = (end - start) / 60
+        except Exception:
+            hours = ''
+        writer.writerow([project_label, date, hours])
+
+def output_csv_detailed(log_dict):
+    project_codes = log_dict.get('project_codes', {})
+    # Collect all possible keys
+    all_keys = set()
+    for log in log_dict['logs']:
+        all_keys.update(log.keys())
+    all_keys = sorted(all_keys)
+    if 'hours' not in all_keys:
+        all_keys.append('hours')
+    if 'project_label' not in all_keys:
+        all_keys.insert(0, 'project_label')
+    writer = csv.DictWriter(sys.stdout, fieldnames=all_keys)
+    writer.writeheader()
+    for log in log_dict['logs']:
+        row = {k: log.get(k, '') for k in all_keys}
+        project_code = log.get('project', '')
+        if project_code not in project_codes:
+            raise ValueError(f"Project code '{project_code}' not found in project_codes mapping.")
+        row['project_label'] = project_codes[project_code]
+        try:
+            row['hours'] = (float(log['end']) - float(log['start'])) / 60
+        except Exception:
+            row['hours'] = ''
+        writer.writerow(row)
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('path', help='path to log file')
     parser.add_argument('-d', '--daily_log', help='print hours from each minutes dict', action='store_true')
+    parser.add_argument('--csv-basic', help='output basic CSV (project, date, hours)', action='store_true')
+    parser.add_argument('--csv-detailed', help='output detailed CSV (all fields)', action='store_true')
     args = parser.parse_args()
 
     log_dict = get_log_dict(args.path)
@@ -135,6 +182,14 @@ if __name__ == "__main__":
     # Get payperiod type and start from YAML
     payperiod_type, period_start = get_payperiod_type_and_start(log_dict)
     payperiod_hours = get_payperiod_hours(mins_dict=mins_dict, payperiod_type=payperiod_type, period_start=period_start)
+
+    if args.csv_basic:
+        output_csv_basic(log_dict)
+        sys.exit(0)
+
+    if args.csv_detailed:
+        output_csv_detailed(log_dict)
+        sys.exit(0)
 
     if args.daily_log:
         for day, minutes in mins_dict.items():
