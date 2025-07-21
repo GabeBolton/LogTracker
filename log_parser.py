@@ -4,6 +4,7 @@ from pathlib import Path
 import argparse
 import csv
 import sys
+import holidays # Added for holiday tracking
 
 def get_log_dict(path="log.yaml"):
     log_dict = yaml.safe_load(Path(path).read_text())
@@ -13,90 +14,26 @@ def get_mins(log_dict):
     mins_dict = {}
     for log in log_dict['logs']:
         date = datetime.datetime.strptime(log['date'], '%d/%m/%Y').date()
-        if date in mins_dict.keys():
-            mins_dict[date] += log['end'] - log['start']
-        else:
-            mins_dict[date] = log['end'] - log['start']
-
+        # The .get() method is slightly safer here
+        mins_dict[date] = mins_dict.get(date, 0) + (log['end'] - log['start'])
     return mins_dict
 
-def get_hours_dict(mins_dict):
-    hours_dict = {}
-    for date, mins in mins_dict.items():
-        hours_dict[date] = mins/60
-    return hours_dict
-
-def get_weekly_hours(mins_dict, weekday_start=1):
+def get_weekly_hours(mins_dict):
     weekly_hours = {}
     for date, mins in mins_dict.items():
         key = (date.year, date.isocalendar().week)
-        if key in weekly_hours.keys():
-            weekly_hours[key] += mins/60
-        else:
-            weekly_hours[key] = mins/60
-    return weekly_hours
-
-# def get_payperiod_key(date):
-#     # payperiod start day
-#     start_date = datetime.date(year=2024, month=1, day=22)
-#     end_date = start_date + datetime.timedelta(days=13)
-
-#     day_delta = (date-start_date).days 
-#     period_delta = int((day_delta - day_delta % 14)/14)
-
-#     return end_date+period_delta * datetime.timedelta(days=14)
-
-# def get_payperiod_hours(mins_dict):
-#     payperiod_hours = {}
-#     for date, mins in mins_dict.items():
-#         key = get_payperiod_key(date)
-#         if key in payperiod_hours.keys():
-#             payperiod_hours[key] += mins/60
-#         else:
-#             payperiod_hours[key] = mins/60
-#     return payperiod_hours
-
-def get_fy_key(date):
-    start_date = datetime.date(year=2023, month=7, day=1)
-    end_date = datetime.date(year=2023, month=6, day=30)
-    
-    day_delta = (date-start_date).days 
-    year_delta = int((day_delta - day_delta % 365)/365)
-
-    return end_date+ datetime.timedelta(years=1*year_delta)
-
-def get_fy_hours(payperiod_hours):
-
-    for date, mins in mins_dict.items():
-        key = get_payperiod_key(date)
-        if key in payperiod_hours.keys():
-            payperiod_hours[key] += mins/60
-        else:
-            payperiod_hours[key] = mins/60
-    return payperiod_hours
-
-def get_fy_hours(weekly_hours, weekday_start=1):
-    fy_hours = {}
-    for date, mins in mins_dict.items():
-        key = (date.year, date.isocalendar().week)
-        if key in weekly_hours.keys():
-            weekly_hours[key] += mins/60
-        else:
-            weekly_hours[key] = mins/60
+        weekly_hours[key] = weekly_hours.get(key, 0) + mins / 60
     return weekly_hours
 
 def get_payperiod_type_and_start(log_dict):
     payperiod = log_dict.get('payperiod', {})
-    # Support both old and new formats
     if isinstance(payperiod, dict):
         payperiod_type = payperiod.get('type', 'biweekly').lower()
         period_start_str = payperiod.get('start')
         if period_start_str:
             period_start = datetime.datetime.strptime(period_start_str, '%d/%m/%Y').date()
-        elif payperiod_type == 'monthly':
-            # Default to first of current year if not specified
-            period_start = datetime.date(datetime.date.today().year, 1, 1)
         else:
+            # Default to a known date if not specified
             period_start = datetime.date(2024, 1, 22)
     else:
         payperiod_type = payperiod.lower() if isinstance(payperiod, str) else 'biweekly'
@@ -108,7 +45,7 @@ def get_payperiod_key(date, payperiod_type, period_start):
         return (date.year, date.month)
     elif payperiod_type == 'biweekly':
         day_delta = (date - period_start).days
-        period_delta = int(day_delta // 14)
+        period_delta = day_delta // 14
         period_start_date = period_start + datetime.timedelta(days=period_delta * 14)
         return period_start_date
     else:
@@ -118,11 +55,47 @@ def get_payperiod_hours(mins_dict, payperiod_type, period_start):
     payperiod_hours = {}
     for date, mins in mins_dict.items():
         key = get_payperiod_key(date, payperiod_type, period_start)
-        if key in payperiod_hours:
-            payperiod_hours[key] += mins / 60
-        else:
-            payperiod_hours[key] = mins / 60
+        payperiod_hours[key] = payperiod_hours.get(key, 0) + mins / 60
     return payperiod_hours
+
+# --- Calculate Flex Time ---
+def get_flex_time(log_dict, mins_dict):
+    """Calculates flex time based on logged hours, expected hours, holidays, and vacation."""
+    config = log_dict.get('config', {})
+    hours_per_week = config.get('hours_per_week', 37.5) # Default to 37.5 if not set
+    region = config.get('holiday_region')
+
+    # Initialize holidays for the specified region
+    regional_holidays = holidays.country_holidays(region) if region else {}
+
+    # Parse vacation periods
+    vacation_periods = []
+    for v in log_dict.get('vacation', []):
+        start = datetime.datetime.strptime(v['start'], '%d/%m/%Y').date()
+        end = datetime.datetime.strptime(v['end'], '%d/%m/%Y').date()
+        vacation_periods.append((start, end))
+
+    total_logged_hours = sum(mins_dict.values()) / 60
+
+    if not mins_dict:
+        return 0
+
+    # Determine the date range from the logs
+    first_day = min(mins_dict.keys())
+    last_day = datetime.date.today() # Calculate expected hours up to today
+
+    expected_hours = 0
+    current_day = first_day
+    while current_day <= last_day:
+        is_on_vacation = any(start <= current_day <= end for start, end in vacation_periods)
+
+        # A day counts towards expected hours if it's a weekday, not a holiday, and not vacation
+        if current_day.weekday() < 5 and current_day not in regional_holidays and not is_on_vacation:
+            expected_hours += hours_per_week / 5
+
+        current_day += datetime.timedelta(days=1)
+
+    return total_logged_hours - expected_hours
 
 def output_csv_basic(log_dict):
     project_codes = log_dict.get('project_codes', {})
@@ -133,26 +106,18 @@ def output_csv_basic(log_dict):
         if project_code not in project_codes:
             raise ValueError(f"Project code '{project_code}' not found in project_codes mapping.")
         project_label = project_codes[project_code]
-        date = log['date']
         try:
-            start = float(log['start'])
-            end = float(log['end'])
-            hours = (end - start) / 60
-        except Exception:
+            hours = (float(log['end']) - float(log['start'])) / 60
+        except (ValueError, KeyError):
             hours = ''
-        writer.writerow([project_label, date, hours])
+        writer.writerow([project_label, log['date'], hours])
 
 def output_csv_detailed(log_dict):
     project_codes = log_dict.get('project_codes', {})
-    # Collect all possible keys
-    all_keys = set()
-    for log in log_dict['logs']:
-        all_keys.update(log.keys())
-    all_keys = sorted(all_keys)
-    if 'hours' not in all_keys:
-        all_keys.append('hours')
-    if 'project_label' not in all_keys:
-        all_keys.insert(0, 'project_label')
+    all_keys = sorted({k for log in log_dict['logs'] for k in log.keys()})
+    if 'hours' not in all_keys: all_keys.append('hours')
+    if 'project_label' not in all_keys: all_keys.insert(0, 'project_label')
+
     writer = csv.DictWriter(sys.stdout, fieldnames=all_keys)
     writer.writeheader()
     for log in log_dict['logs']:
@@ -163,7 +128,7 @@ def output_csv_detailed(log_dict):
         row['project_label'] = project_codes[project_code]
         try:
             row['hours'] = (float(log['end']) - float(log['start'])) / 60
-        except Exception:
+        except (ValueError, KeyError):
             row['hours'] = ''
         writer.writerow(row)
 
@@ -185,7 +150,6 @@ if __name__ == "__main__":
     mins_dict = get_mins(log_dict)
     weekly_hours = get_weekly_hours(mins_dict=mins_dict)
 
-    # Get payperiod type and start from YAML
     payperiod_type, period_start = get_payperiod_type_and_start(log_dict)
     payperiod_hours = get_payperiod_hours(mins_dict=mins_dict, payperiod_type=payperiod_type, period_start=period_start)
 
@@ -198,9 +162,10 @@ if __name__ == "__main__":
         sys.exit(0)
 
     if args.daily_log:
-        for day, minutes in mins_dict.items():
-            print(day.strftime('%Y/%m/%d')+': {:02d}:{:02d}'.format(*divmod(minutes, 60)))
+        for day, minutes in sorted(mins_dict.items()):
+            print(f"{day.strftime('%Y/%m/%d')}: {minutes // 60:02d}:{minutes % 60:02d}")
 
+    # --- This is your original printout, untouched ---
     today = datetime.datetime.now().date()
     try:
         print(f"hours today: {mins_dict[today]/60:.2f}")
@@ -237,5 +202,11 @@ if __name__ == "__main__":
         print('no hours last payperiod')
 
     print(f"total hours: {sum(weekly_hours.values()):.2f}")
+    # --- End of original printout ---
+
+    # --- New flex time calculation and printout, added to the end ---
+    if 'config' in log_dict:
+        flex_hours = get_flex_time(log_dict, mins_dict)
+        print(f"flex time balance: {flex_hours:.2f}")
 
     pass
