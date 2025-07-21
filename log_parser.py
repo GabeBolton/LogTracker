@@ -194,10 +194,10 @@ class WorkLog:
                 widths[h] = max(widths[h], len(row.get(label, '')))
 
         # Print header
-        header_line = " | ".join(l.ljust(widths[h]) for h, l in zip(headers, header_labels))
-        print("--- Work Hours Summary ---")
+        header_line = "| " + " | ".join(l.ljust(widths[h]) for h, l in zip(headers, header_labels)) + " |"
+        print("## Work Hours Summary ##")
         print(header_line)
-        print("-|-".join('-' * widths[h] for h in headers)) # Separator
+        print("| " + "-|-".join('-' * widths[h] for h in headers) + " |") # Separator
 
         # Print rows
         for row in rows:
@@ -205,7 +205,7 @@ class WorkLog:
             for h in headers:
                 label = self.project_codes.get(h, h)
                 row_line_parts.append(row.get(label, '0.00').rjust(widths[h]))
-            print(" | ".join(row_line_parts))
+            print("| " + " | ".join(row_line_parts) + " |")
 
     def output_csv_basic(self):
         """Outputs a basic CSV of project, date, and hours."""
