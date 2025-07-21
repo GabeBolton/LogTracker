@@ -4,209 +4,252 @@ from pathlib import Path
 import argparse
 import csv
 import sys
-import holidays # Added for holiday tracking
+import holidays
 
-def get_log_dict(path="log.yaml"):
-    log_dict = yaml.safe_load(Path(path).read_text())
-    return log_dict
+class WorkLog:
+    """
+    An object-oriented class to parse, analyze, and report on work logs.
+    """
+    def __init__(self, file_path):
+        """Initializes the WorkLog object by loading and parsing the YAML file."""
+        self._raw_dict = yaml.safe_load(Path(file_path).read_text())
+        
+        self.logs = self._raw_dict.get('logs', [])
+        self.config = self._raw_dict.get('config', {})
+        self.project_codes = self._raw_dict.get('project_codes', {})
+        self.payperiod_config = self._raw_dict.get('payperiod', {})
+        self.vacation_config = self._raw_dict.get('vacation', [])
 
-def get_mins(log_dict):
-    mins_dict = {}
-    for log in log_dict['logs']:
-        date = datetime.datetime.strptime(log['date'], '%d/%m/%Y').date()
-        # The .get() method is slightly safer here
-        mins_dict[date] = mins_dict.get(date, 0) + (log['end'] - log['start'])
-    return mins_dict
+        # Caching for per-project data and totals
+        self._minutes_per_day_by_project = None
+        self._weekly_hours_by_project = None
+        self._pay_period_hours_by_project = None
+        self._flex_time = None
 
-def get_weekly_hours(mins_dict):
-    weekly_hours = {}
-    for date, mins in mins_dict.items():
-        key = (date.year, date.isocalendar().week)
-        weekly_hours[key] = weekly_hours.get(key, 0) + mins / 60
-    return weekly_hours
+    @property
+    def minutes_per_day_by_project(self):
+        """
+        Calculates minutes per day, broken down by project.
+        Logs without a project are grouped under 'Unassigned'.
+        """
+        if self._minutes_per_day_by_project is None:
+            data = {}
+            for log in self.logs:
+                date = datetime.datetime.strptime(log['date'], '%d/%m/%Y').date()
+                # If project is missing or empty, default to "Unassigned"
+                project = log.get('project') or "Unassigned"
+                duration = log.get('end', 0) - log.get('start', 0)
+                
+                if date not in data:
+                    data[date] = {}
+                data[date][project] = data[date].get(project, 0) + duration
+            self._minutes_per_day_by_project = data
+        return self._minutes_per_day_by_project
 
-def get_payperiod_type_and_start(log_dict):
-    payperiod = log_dict.get('payperiod', {})
-    if isinstance(payperiod, dict):
-        payperiod_type = payperiod.get('type', 'biweekly').lower()
-        period_start_str = payperiod.get('start')
-        if period_start_str:
-            period_start = datetime.datetime.strptime(period_start_str, '%d/%m/%Y').date()
-        else:
-            # Default to a known date if not specified
-            period_start = datetime.date(2024, 1, 22)
-    else:
-        payperiod_type = payperiod.lower() if isinstance(payperiod, str) else 'biweekly'
-        period_start = datetime.date(2024, 1, 22)
-    return payperiod_type, period_start
+    @property
+    def weekly_hours_by_project(self):
+        """Calculates hours per week, broken down by project."""
+        if self._weekly_hours_by_project is None:
+            data = {}
+            for date, projects in self.minutes_per_day_by_project.items():
+                key = (date.year, date.isocalendar().week)
+                if key not in data:
+                    data[key] = {}
+                for project, mins in projects.items():
+                    data[key][project] = data[key].get(project, 0) + (mins / 60)
+            self._weekly_hours_by_project = data
+        return self._weekly_hours_by_project
 
-def get_payperiod_key(date, payperiod_type, period_start):
-    if payperiod_type == 'monthly':
-        return (date.year, date.month)
-    elif payperiod_type == 'biweekly':
+    @property
+    def pay_period_hours_by_project(self):
+        """Calculates hours per pay period, broken down by project."""
+        if self._pay_period_hours_by_project is None:
+            data = {}
+            payperiod_type, start_date = self._get_payperiod_type_and_start()
+            for date, projects in self.minutes_per_day_by_project.items():
+                key = self._get_payperiod_key(date, payperiod_type, start_date)
+                if key not in data:
+                    data[key] = {}
+                for project, mins in projects.items():
+                    data[key][project] = data[key].get(project, 0) + (mins / 60)
+            self._pay_period_hours_by_project = data
+        return self._pay_period_hours_by_project
+
+    @property
+    def flex_time(self):
+        """Calculates and caches the flex time balance."""
+        if self._flex_time is None:
+            total_logged_hours = sum(sum(p.values()) for p in self.minutes_per_day_by_project.values()) / 60
+            if not self.minutes_per_day_by_project:
+                self._flex_time = 0
+                return self._flex_time
+
+            hours_per_week = self.config.get('hours_per_week', 37.5)
+            region = self.config.get('holiday_region')
+            regional_holidays = holidays.country_holidays(region) if region else {}
+            
+            vacation_periods = [(datetime.datetime.strptime(v['start'], '%d/%m/%Y').date(), datetime.datetime.strptime(v['end'], '%d/%m/%Y').date()) for v in self.vacation_config]
+
+            first_day = min(self.minutes_per_day_by_project.keys())
+            last_day = datetime.date.today()
+            
+            expected_hours = 0
+            current_day = first_day
+            while current_day <= last_day:
+                is_on_vacation = any(start <= current_day <= end for start, end in vacation_periods)
+                if current_day.weekday() < 5 and current_day not in regional_holidays and not is_on_vacation:
+                    expected_hours += hours_per_week / 5
+                current_day += datetime.timedelta(days=1)
+            
+            self._flex_time = total_logged_hours - expected_hours
+        return self._flex_time
+
+    def _get_payperiod_type_and_start(self):
+        payperiod_type = self.payperiod_config.get('type', 'biweekly').lower()
+        start_str = self.payperiod_config.get('start')
+        start_date = datetime.datetime.strptime(start_str, '%d/%m/%Y').date() if start_str else datetime.date(2024, 1, 22)
+        return payperiod_type, start_date
+
+    def _get_payperiod_key(self, date, payperiod_type, period_start):
+        if payperiod_type == 'monthly': return (date.year, date.month)
         day_delta = (date - period_start).days
         period_delta = day_delta // 14
-        period_start_date = period_start + datetime.timedelta(days=period_delta * 14)
-        return period_start_date
-    else:
-        raise ValueError(f"Unknown payperiod type: {payperiod_type}")
+        return period_start + datetime.timedelta(days=period_delta * 14)
+    
+    def display_summary(self):
+        """Prints a full summary report to the console in a formatted table."""
+        today = datetime.date.today()
+        
+        # --- 1. Define Headers and Rows ---
+        # Dynamically get all projects that have logged time
+        all_projects_in_logs = set()
+        for weekly_data in self.weekly_hours_by_project.values():
+            all_projects_in_logs.update(weekly_data.keys())
+        project_headers = sorted(list(all_projects_in_logs))
+        
+        headers = ["Period"] + project_headers + ["Total"]
+        
+        table_rows = []
 
-def get_payperiod_hours(mins_dict, payperiod_type, period_start):
-    payperiod_hours = {}
-    for date, mins in mins_dict.items():
-        key = get_payperiod_key(date, payperiod_type, period_start)
-        payperiod_hours[key] = payperiod_hours.get(key, 0) + mins / 60
-    return payperiod_hours
+        # --- 2. Gather Data for Each Row ---
+        # Today
+        today_data = self.minutes_per_day_by_project.get(today, {})
+        table_rows.append(self._create_table_row("Today", today_data, project_headers, is_minutes=True))
 
-# --- Calculate Flex Time ---
-def get_flex_time(log_dict, mins_dict):
-    """Calculates flex time based on logged hours, expected hours, holidays, and vacation."""
-    config = log_dict.get('config', {})
-    hours_per_week = config.get('hours_per_week', 37.5) # Default to 37.5 if not set
-    region = config.get('holiday_region')
+        # This Week
+        week_key = (today.year, today.isocalendar().week)
+        this_week_data = self.weekly_hours_by_project.get(week_key, {})
+        table_rows.append(self._create_table_row("This Week", this_week_data, project_headers))
 
-    # Initialize holidays for the specified region
-    regional_holidays = holidays.country_holidays(region) if region else {}
+        # Last Week
+        last_week_date = today - datetime.timedelta(weeks=1)
+        last_week_key = (last_week_date.year, last_week_date.isocalendar().week)
+        last_week_data = self.weekly_hours_by_project.get(last_week_key, {})
+        table_rows.append(self._create_table_row("Last Week", last_week_data, project_headers))
 
-    # Parse vacation periods
-    vacation_periods = []
-    for v in log_dict.get('vacation', []):
-        start = datetime.datetime.strptime(v['start'], '%d/%m/%Y').date()
-        end = datetime.datetime.strptime(v['end'], '%d/%m/%Y').date()
-        vacation_periods.append((start, end))
+        # Pay Periods
+        payperiod_type, start_date = self._get_payperiod_type_and_start()
+        this_pp_key = self._get_payperiod_key(today, payperiod_type, start_date)
+        this_pp_data = self.pay_period_hours_by_project.get(this_pp_key, {})
+        table_rows.append(self._create_table_row("This Pay Period", this_pp_data, project_headers))
+        
+        # Grand Total
+        total_data = {}
+        for weekly_data in self.weekly_hours_by_project.values():
+            for project, hours in weekly_data.items():
+                total_data[project] = total_data.get(project, 0) + hours
+        table_rows.append(self._create_table_row("Grand Total", total_data, project_headers))
 
-    total_logged_hours = sum(mins_dict.values()) / 60
+        # --- 3. Format and Print Table ---
+        self._print_table(headers, table_rows)
+        
+        # --- 4. Print Additional Info ---
+        print("\n## Totals & Balances ##")
+        if self.config:
+            print(f"Flex Time Balance: {self.flex_time:.2f} hours")
 
-    if not mins_dict:
-        return 0
+    def _create_table_row(self, period_name, data_dict, project_headers, is_minutes=False):
+        """Helper to build a single row dictionary for the table."""
+        row = {"Period": period_name}
+        total = 0
+        for p_header in project_headers:
+            val = data_dict.get(p_header, 0)
+            # Use project code itself as label if not in project_codes, e.g. for "Unassigned"
+            label = self.project_codes.get(p_header, p_header)
+            hours = val / 60 if is_minutes else val
+            row[label] = f"{hours:.2f}"
+            total += hours
+        row["Total"] = f"{total:.2f}"
+        return row
 
-    # Determine the date range from the logs
-    first_day = min(mins_dict.keys())
-    last_day = datetime.date.today() # Calculate expected hours up to today
+    def _print_table(self, headers, rows):
+        """Helper to format and print a list of dicts as a pretty table."""
+        # Map project codes to their labels for the header row
+        header_labels = [self.project_codes.get(h, h) for h in headers]
+        
+        widths = {h: len(l) for h, l in zip(headers, header_labels)}
+        for row in rows:
+            for h in headers:
+                label = self.project_codes.get(h, h)
+                widths[h] = max(widths[h], len(row.get(label, '')))
 
-    expected_hours = 0
-    current_day = first_day
-    while current_day <= last_day:
-        is_on_vacation = any(start <= current_day <= end for start, end in vacation_periods)
+        # Print header
+        header_line = " | ".join(l.ljust(widths[h]) for h, l in zip(headers, header_labels))
+        print("--- Work Hours Summary ---")
+        print(header_line)
+        print("-|-".join('-' * widths[h] for h in headers)) # Separator
 
-        # A day counts towards expected hours if it's a weekday, not a holiday, and not vacation
-        if current_day.weekday() < 5 and current_day not in regional_holidays and not is_on_vacation:
-            expected_hours += hours_per_week / 5
+        # Print rows
+        for row in rows:
+            row_line_parts = []
+            for h in headers:
+                label = self.project_codes.get(h, h)
+                row_line_parts.append(row.get(label, '0.00').rjust(widths[h]))
+            print(" | ".join(row_line_parts))
 
-        current_day += datetime.timedelta(days=1)
+    def output_csv_basic(self):
+        """Outputs a basic CSV of project, date, and hours."""
+        writer = csv.writer(sys.stdout)
+        writer.writerow(['project', 'date', 'hours'])
+        for log in self.logs:
+            project_code = log.get('project')
+            # Use the project code as the label if it's not in project_codes, or show "Unassigned"
+            project_label = self.project_codes.get(project_code, project_code or "Unassigned")
+            hours = (log['end'] - log['start']) / 60 if 'end' in log and 'start' in log else ''
+            writer.writerow([project_label, log['date'], f"{hours:.2f}"])
 
-    return total_logged_hours - expected_hours
+    def output_csv_detailed(self):
+        """Outputs a detailed CSV with all log fields."""
+        all_keys = sorted({k for log in self.logs for k in log.keys()})
+        if 'hours' not in all_keys: all_keys.append('hours')
+        if 'project_label' not in all_keys: all_keys.insert(0, 'project_label')
 
-def output_csv_basic(log_dict):
-    project_codes = log_dict.get('project_codes', {})
-    writer = csv.writer(sys.stdout)
-    writer.writerow(['project', 'date', 'hours'])
-    for log in log_dict['logs']:
-        project_code = log.get('project', '')
-        if project_code not in project_codes:
-            raise ValueError(f"Project code '{project_code}' not found in project_codes mapping.")
-        project_label = project_codes[project_code]
-        try:
-            hours = (float(log['end']) - float(log['start'])) / 60
-        except (ValueError, KeyError):
-            hours = ''
-        writer.writerow([project_label, log['date'], hours])
-
-def output_csv_detailed(log_dict):
-    project_codes = log_dict.get('project_codes', {})
-    all_keys = sorted({k for log in log_dict['logs'] for k in log.keys()})
-    if 'hours' not in all_keys: all_keys.append('hours')
-    if 'project_label' not in all_keys: all_keys.insert(0, 'project_label')
-
-    writer = csv.DictWriter(sys.stdout, fieldnames=all_keys)
-    writer.writeheader()
-    for log in log_dict['logs']:
-        row = {k: log.get(k, '') for k in all_keys}
-        project_code = log.get('project', '')
-        if project_code not in project_codes:
-            raise ValueError(f"Project code '{project_code}' not found in project_codes mapping.")
-        row['project_label'] = project_codes[project_code]
-        try:
-            row['hours'] = (float(log['end']) - float(log['start'])) / 60
-        except (ValueError, KeyError):
-            row['hours'] = ''
-        writer.writerow(row)
-
-def assert_all_logs_have_project(log_dict):
-    for i, log in enumerate(log_dict['logs']):
-        if 'project' not in log or not log['project']:
-            raise ValueError(f"Log entry at index {i} and date {log.get('date', 'unknown')} is missing a 'project' field.")
+        writer = csv.DictWriter(sys.stdout, fieldnames=all_keys)
+        writer.writeheader()
+        for log in self.logs:
+            row = {k: log.get(k, '') for k in all_keys}
+            project_code = log.get('project')
+            row['project_label'] = self.project_codes.get(project_code, project_code or "Unassigned")
+            row['hours'] = (log['end'] - log['start']) / 60 if 'end' in log and 'start' in log else ''
+            writer.writerow(row)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument('path', help='path to log file')
-    parser.add_argument('-d', '--daily_log', help='print hours from each minutes dict', action='store_true')
-    parser.add_argument('--csv-basic', help='output basic CSV (project, date, hours)', action='store_true')
-    parser.add_argument('--csv-detailed', help='output detailed CSV (all fields)', action='store_true')
-    args = parser.parse_args()
-
-    log_dict = get_log_dict(args.path)
-    assert_all_logs_have_project(log_dict)
-    mins_dict = get_mins(log_dict)
-    weekly_hours = get_weekly_hours(mins_dict=mins_dict)
-
-    payperiod_type, period_start = get_payperiod_type_and_start(log_dict)
-    payperiod_hours = get_payperiod_hours(mins_dict=mins_dict, payperiod_type=payperiod_type, period_start=period_start)
-
-    if args.csv_basic:
-        output_csv_basic(log_dict)
-        sys.exit(0)
-
-    if args.csv_detailed:
-        output_csv_detailed(log_dict)
-        sys.exit(0)
-
-    if args.daily_log:
-        for day, minutes in sorted(mins_dict.items()):
-            print(f"{day.strftime('%Y/%m/%d')}: {minutes // 60:02d}:{minutes % 60:02d}")
-
-    # --- This is your original printout, untouched ---
-    today = datetime.datetime.now().date()
-    try:
-        print(f"hours today: {mins_dict[today]/60:.2f}")
-    except KeyError:
-        print('no hours today')
+    parser = argparse.ArgumentParser(description="An object-oriented tool to parse and analyze work logs.")
+    parser.add_argument('path', help='Path to the YAML log file')
+    parser.add_argument('--csv-basic', help='Output a basic CSV report', action='store_true')
+    parser.add_argument('--csv-detailed', help='Output a detailed CSV report', action='store_true')
     
+    args = parser.parse_args()
     try:
-        print(f"hours this week: {weekly_hours[(today.year, today.isocalendar().week)]:.2f}")
-    except KeyError:
-        print('no hours this week')
+        work_log = WorkLog(args.path)
 
-    try:
-        print(f"hours last week: {weekly_hours[(today.year, today.isocalendar().week-1)]:.2f}")
-    except KeyError:
-        print('no hours last week')
+        if args.csv_basic:
+            work_log.output_csv_basic()
+        elif args.csv_detailed:
+            work_log.output_csv_detailed()
+        else:
+            work_log.display_summary()
 
-    # Print hours this payperiod
-    try:
-        this_period_key = get_payperiod_key(today, payperiod_type, period_start)
-        print(f"hours this payperiod: {payperiod_hours[this_period_key]:.2f}")
-    except KeyError:
-        print('no hours this payperiod')
-
-    # Print hours last payperiod
-    try:
-        if payperiod_type == 'monthly':
-            last_month = today.month - 1 if today.month > 1 else 12
-            last_year = today.year if today.month > 1 else today.year - 1
-            last_period_key = (last_year, last_month)
-        else:  # biweekly
-            last_period_key = get_payperiod_key(today - datetime.timedelta(days=14), payperiod_type, period_start)
-        print(f"hours last payperiod: {payperiod_hours[last_period_key]:.2f}")
-    except KeyError:
-        print('no hours last payperiod')
-
-    print(f"total hours: {sum(weekly_hours.values()):.2f}")
-    # --- End of original printout ---
-
-    # --- New flex time calculation and printout, added to the end ---
-    if 'config' in log_dict:
-        flex_hours = get_flex_time(log_dict, mins_dict)
-        print(f"flex time balance: {flex_hours:.2f}")
-
-    pass
+    except (FileNotFoundError, ValueError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
