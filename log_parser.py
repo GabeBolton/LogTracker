@@ -220,17 +220,19 @@ class WorkLog:
 
     def output_csv_detailed(self):
         """Outputs a detailed CSV with all log fields."""
-        all_keys = sorted({k for log in self.logs for k in log.keys()})
-        if 'hours' not in all_keys: all_keys.append('hours')
-        if 'project_label' not in all_keys: all_keys.insert(0, 'project_label')
+        fieldnames = ['Work Category', 'Description', 'Date', 'Start', 'End', 'Hours']
 
-        writer = csv.DictWriter(sys.stdout, fieldnames=all_keys)
+        writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames)
         writer.writeheader()
         for log in self.logs:
-            row = {k: log.get(k, '') for k in all_keys}
             project_code = log.get('project')
-            row['project_label'] = self.project_codes.get(project_code, project_code or "Unassigned")
-            row['hours'] = (log['end'] - log['start']) / 60 if 'end' in log and 'start' in log else ''
+            row = {}
+            row['Work Category'] = self.project_codes.get(project_code, project_code or "Unassigned")
+            row['Description'] = log['work']
+            row['Date'] = log['date']
+            row['Hours'] = (log['end'] - log['start']) / 60 if 'end' in log and 'start' in log else ''
+            row['Start'] = log['start'] / 60
+            row['End'] = log['end'] / 60
             writer.writerow(row)
 
 if __name__ == "__main__":
